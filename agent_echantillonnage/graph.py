@@ -1,42 +1,50 @@
 """
 Graphe LangGraph de l'Agent Échantillonnage.
-C'est ici qu'on connecte les nœuds dans l'ordre.
+Le graphe décide dynamiquement de continuer le dialogue
+ou de passer au calcul.
 """
 
 from langgraph.graph import StateGraph, START, END
 from .state import SamplingState
-from .nodes import (
-    noeud_accueil,
-    noeud_extraction,
-    noeud_calcul,
-    noeud_restitution,
-)
+from .nodes import noeud_dialogue, noeud_calcul, noeud_restitution
+
+
+def _continuer_ou_calculer(state: SamplingState) -> str:
+    """
+    Décision : continuer le dialogue ou passer au calcul ?
+    """
+    if state.pret_pour_calcul:
+        return "calculer"
+    return "dialoguer"
 
 
 def creer_agent_echantillonnage():
-    """
-    Crée et retourne le graphe compilé de l'agent.
-    """
 
-    # ── Créer le graphe avec notre State ──
     graphe = StateGraph(SamplingState)
 
-    # ── Ajouter les nœuds ──
-    graphe.add_node("accueil", noeud_accueil)
-    graphe.add_node("extraction", noeud_extraction)
+    # Ajouter les nœuds
+    graphe.add_node("dialogue", noeud_dialogue)
     graphe.add_node("calcul", noeud_calcul)
     graphe.add_node("restitution", noeud_restitution)
 
-    # ── Connecter les nœuds dans l'ordre ──
-    graphe.add_edge(START, "accueil")
-    graphe.add_edge("accueil", "extraction")
-    graphe.add_edge("extraction", "calcul")
+    # Point d'entrée
+    graphe.add_edge(START, "dialogue")
+
+    # Décision après dialogue
+    graphe.add_conditional_edges(
+        "dialogue",
+        _continuer_ou_calculer,
+        {
+            "dialoguer": END,      # on attend la prochaine réponse du client
+            "calculer": "calcul",  # on calcule
+        }
+    )
+
+    # Après calcul → restitution → fin
     graphe.add_edge("calcul", "restitution")
     graphe.add_edge("restitution", END)
 
-    # ── Compiler le graphe ──
     return graphe.compile()
 
 
-# Instance prête à l'emploi
 agent_echantillonnage = creer_agent_echantillonnage()
