@@ -10,7 +10,6 @@ Flow :
 
 import json
 import os
-import streamlit as st
 from google import genai
 from dotenv import load_dotenv
 
@@ -25,10 +24,10 @@ load_dotenv()
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 PALIERS_DISPONIBLES = [50, 100, 150, 250, 500, 1000, 2000, 5000]
+MARGE_REFERENCE = 5.0
 
 
 def _gemini(prompt: str) -> str:
-    """Appel Gemini — LLM narratif uniquement, jamais de calcul."""
     response = client.models.generate_content(
         model="gemini-2.5-flash",
         contents=prompt,
@@ -40,14 +39,10 @@ def _gemini(prompt: str) -> str:
 # ÉTAPE 1 — Message d'accueil
 # ─────────────────────────────────────────
 def message_accueil() -> dict:
-    """
-    Lit le contexte du questionnaire depuis la DB
-    et génère le message d'accueil.
-    """
     contexte = get_contexte_questionnaire()
     texte = (
         f"👋 Bonjour ! Je suis l'agent d'échantillonnage Tale.\n\n"
-        f"J'ai récupéré votre questionnaire  :\n"
+        f"J'ai récupéré votre questionnaire :\n"
         f"📋 {contexte['titre']}\n"
         f"🎯 Objectif : {contexte['objectif']}\n"
         f"❓ {contexte['nb_questions']} questions · "
@@ -55,7 +50,7 @@ def message_accueil() -> dict:
         f"Je vais vous aider à définir votre plan d'échantillonnage "
         f"en 2 étapes simples.\n\n"
         f"---\n"
-        f"Étape 1 sur 2 — Combien de répondants souhaitez-vous ?\n\n"
+        f"**Étape 1 sur 2 — Combien de répondants souhaitez-vous ?**\n\n"
         f"Choisissez un palier :"
     )
     return {
@@ -70,35 +65,25 @@ def message_accueil() -> dict:
 # ÉTAPE 2 — Après choix de N
 # ─────────────────────────────────────────
 def apres_choix_n(n: int) -> dict:
-    """
-    Reçoit le N choisi.
-    Calcule la marge immédiatement.
-    Présente les catégories disponibles avec les règles.
-    """
     marge = _calculer_marge(n)
     palier = _palier_le_plus_proche(n)
     regles = REGLES_PALIERS[palier]
     max_criteres = regles["max_criteres"]
     criteres_rec = regles["criteres_recommandes"]
 
-    # Couleur marge
-    if marge > 10:
-        marge_txt = f"⚠️ ±{marge:.1f}% (élevée)"
-    elif marge > 7:
-        marge_txt = f"🟡 ±{marge:.1f}% (modérée)"
-    else:
-        marge_txt = f"✅ ±{marge:.1f}% (bonne)"
-
     texte = (
-        f"✅ {n} répondants sélectionnés.\n\n"
-        f"📊 Marge d'erreur théorique : {marge_txt}\n"
-        f"Étape 2 sur 2 — Quelles catégories de ciblage souhaitez-vous ?\n\n"
-        f"⚠️ Règle statistique : Pour {n} répondants, "
-        f"vous pouvez sélectionner maximum {max_criteres} critère(s).\n"
-        f"Au-delà, les cellules seront trop petites pour être fiables.\n\n"
-        f"💡 Recommandé pour ce palier : "
+        f"✅ **{n} répondants** sélectionnés.\n\n"
+        f"📊 **Marge d'erreur : ±{marge:.1f}%**\n"
+        f"*(Référence industrie : ±{MARGE_REFERENCE}% · "
+        f"Formule : ME = 1.96 × √(0.5×0.5/{n}))*\n\n"
+        f"---\n"
+        f"**Étape 2 sur 2 — Quelles catégories de ciblage souhaitez-vous ?**\n\n"
+        f"Pour **{n} répondants**, vous pouvez sélectionner "
+        f"**maximum {max_criteres} critère(s)**.\n"
+        f"Au-delà, les sous-groupes seront trop petits pour être statistiquement fiables.\n\n"
+        f"💡 Recommandé : "
         f"{', '.join([CATEGORIES[c]['label'] for c in criteres_rec])}\n\n"
-        f"Catégories disponibles :"
+        f"**Catégories disponibles :**"
     )
 
     return {
@@ -116,11 +101,6 @@ def apres_choix_n(n: int) -> dict:
 # ÉTAPE 3 — Après choix des catégories
 # ─────────────────────────────────────────
 def apres_choix_categories(n: int, criteres: list[str]) -> dict:
-    """
-    Reçoit N + critères choisis.
-    Lance le moteur statistique déterministe.
-    LLM explique le résultat.
-    """
 
     # ── Moteur déterministe ──
     resultat = analyser(n=n, criteres_choisis=criteres)
@@ -128,7 +108,7 @@ def apres_choix_categories(n: int, criteres: list[str]) -> dict:
     # ── Si Personnalisée ──
     if resultat.offre_type == "personnalisee":
         texte = (
-            "⚠️ Offre Personnalisée requise\n\n"
+            "⚠️ **Offre Personnalisée requise**\n\n"
             "Les critères suivants n'ont pas de référence INS nationale :\n"
         )
         for r in resultat.raisons_personnalisee:
@@ -143,85 +123,73 @@ def apres_choix_categories(n: int, criteres: list[str]) -> dict:
             "resultat": None,
         }
 
-    # ── Construire le message de pertinence ──
     mp = resultat.message_pertinence
-    alertes_critiques = [a for a in resultat.alertes if a["niveau"] == "critique"]
-    alertes_warnings = [a for a in resultat.alertes if a["niveau"] == "warning"]
 
     # ── LLM explique en langage clair ──
+    criteres_labels = ', '.join([CATEGORIES.get(c, {}).get('label', c) for c in criteres]) or "Aucun"
     prompt_llm = f"""Tu es l'assistant d'échantillonnage de la plateforme Tale (Tunisie).
-Le moteur statistique a produit ces résultats (tu ne recalcules rien) :
+Le moteur statistique a produit ces résultats. Tu ne recalcules rien, tu expliques uniquement.
 
-RÉSULTATS CALCULÉS :
-- Répondants demandés : {n}
-- Marge d'erreur théorique : ±{resultat.marge_erreur}%
+RÉSULTATS :
+- Répondants : {n}
+- Marge d'erreur : ±{resultat.marge_erreur}% (référence industrie : ±{MARGE_REFERENCE}%)
 - Formule : ME = 1.96 × √(0.5 × 0.5 / {n})
 - Niveau de confiance : 95%
-- Critères sélectionnés : {', '.join([CATEGORIES.get(c, {}).get('label', c) for c in criteres])}
+- Critères : {criteres_labels}
 - Disponibilité panel : {mp['disponibilite']}
-- Risque global : {mp['risque']}
-- Cellules critiques : {mp['nb_cellules_critiques']}
-- Cellules fragiles : {mp['nb_cellules_fragiles']}
+- Cellules insuffisantes : {mp['nb_cellules_insuffisantes']}
+- Suggestions : {json.dumps(mp['suggestions'], ensure_ascii=False)}
 
-ALERTES CRITIQUES : {json.dumps(alertes_critiques, ensure_ascii=False)}
-ALERTES WARNINGS : {json.dumps(alertes_warnings, ensure_ascii=False)}
+Rédige 3-4 phrases qui :
+1. Indique la marge d'erreur et la compare à la référence ±{MARGE_REFERENCE}%
+2. Indique si le panel peut fournir les répondants nécessaires
+3. Donne la suggestion principale si nécessaire
 
-SUGGESTIONS : {json.dumps(mp['suggestions'], ensure_ascii=False)}
-
-Rédige un message de pertinence clair et honnête (5-6 phrases max) qui :
-1. Confirme la marge d'erreur et ce qu'elle signifie concrètement
-2. Évalue si le panel peut fournir les répondants nécessaires
-3. Mentionne le risque principal s'il y en a un
-4. Donne UNE recommandation concrète
-
-Ton : professionnel, direct, honnête. Pas de jargon inutile.
-Tu n'inventes AUCUN chiffre."""
+Ton : professionnel, direct. Pas de labels subjectifs. Que des faits et chiffres."""
 
     explication_llm = _gemini(prompt_llm)
 
-    # ── Construire le message final ──
-    texte = "📊Résultat de l'analyse\n\n"
+    # ── Message final ──
+    texte = "**📊 Résultat de l'analyse**\n\n"
 
-    # Métriques principales
+    # Bloc métriques
     texte += (
         f"```\n"
-        f"Marge d'erreur théorique : ±{resultat.marge_erreur}%\n"
-        f"Disponibilité estimée    : {mp['disponibilite']}\n"
-        f"Risque                   : {mp['risque']}\n"
+        f"Marge d'erreur      : ±{resultat.marge_erreur}%\n"
+        f"Référence industrie : ±{MARGE_REFERENCE}%\n"
+        f"Disponibilité panel : {mp['disponibilite']}\n"
         f"```\n\n"
     )
 
     # Explication LLM
-    texte += f"💬Analyse :\n{explication_llm}\n\n"
+    texte += f"💬 **Analyse :**\n{explication_llm}\n\n"
 
     # Suggestions
     if mp["suggestions"]:
-        texte += "💡 Suggestions :\n"
+        texte += "**💡 Suggestions :**\n"
         for s in mp["suggestions"]:
             texte += f"• {s}\n"
         texte += "\n"
 
     # Quotas par cellule
     if resultat.cellules:
-        texte += "📋 Quotas par cellule (selon INS 2024) :\n"
+        texte += "**📋 Quotas par cellule (INS 2024) :**\n"
         critere_courant = None
         for c in resultat.cellules:
             if c.critere != critere_courant:
                 critere_courant = c.critere
                 label = CATEGORIES.get(c.critere, {}).get("label", c.critere)
-                texte += f"\n {label} \n"
-            statut_emoji = {"ok": "✅", "fragile": "🟡", "critique": "🔴"}.get(c.statut, "")
-            texte += (
-                f"  {statut_emoji} {c.valeur} : "
-                f"{c.proportion_ins}% INS → {c.n_quota} requis "
-                f"/ {c.disponibilite_effective} disponibles\n"
+                texte += f"\n*{label}*\n"
+            dispo_txt = (
+                f"{c.disponibilite_effective} disponibles / {c.n_quota} requis"
             )
+            texte += f"  • {c.valeur} : {c.proportion_ins}% INS → {dispo_txt}\n"
 
     texte += "\n---\n"
-    if resultat.disponibilite_globale == "suffisante" and not alertes_critiques:
-        texte += "✅ Votre étude peut être lancée."
+    if resultat.disponibilite_globale == "suffisante" and not mp["nb_cellules_insuffisantes"]:
+        texte += "✅ **Votre étude peut être lancée.**"
     else:
-        texte += "⚠️ Corrigez les alertes avant de lancer l'étude."
+        texte += "⚠️ **Ajustez les paramètres avant de lancer l'étude.**"
 
     return {
         "etape": "resultat",
@@ -229,10 +197,10 @@ Tu n'inventes AUCUN chiffre."""
         "resultat": {
             "n": resultat.n,
             "marge_erreur": resultat.marge_erreur,
+            "marge_reference": resultat.marge_reference,
             "niveau_confiance": resultat.niveau_confiance,
             "offre_type": resultat.offre_type,
             "disponibilite": resultat.disponibilite_globale,
-            "risque": mp["risque"],
             "cellules": [
                 {
                     "critere": c.critere,
@@ -240,12 +208,11 @@ Tu n'inventes AUCUN chiffre."""
                     "proportion_ins": c.proportion_ins,
                     "n_quota": c.n_quota,
                     "disponibilite_effective": c.disponibilite_effective,
-                    "statut": c.statut,
                 }
                 for c in resultat.cellules
             ],
-            "alertes": resultat.alertes,
             "suggestions": mp["suggestions"],
+            "nb_cellules_insuffisantes": mp["nb_cellules_insuffisantes"],
         }
     }
 
@@ -254,28 +221,19 @@ Tu n'inventes AUCUN chiffre."""
 # Helpers
 # ─────────────────────────────────────────
 def _options_paliers() -> list[dict]:
-    """Génère les options de paliers avec marge d'erreur."""
     options = []
     for n in PALIERS_DISPONIBLES:
         marge = _calculer_marge(n)
-        if marge > 10:
-            qualite = "⚠️"
-        elif marge > 7:
-            qualite = "🟡"
-        else:
-            qualite = "✅"
         options.append({
             "valeur": n,
             "label": f"{n} répondants",
             "marge": f"±{marge:.1f}%",
-            "qualite": qualite,
             "prix_dt": f"{n * 0.40:.0f} DT",
         })
     return options
 
 
 def _options_categories(max_criteres: int) -> list[dict]:
-    """Génère les options de catégories."""
     options = []
     for key, cat in CATEGORIES.items():
         options.append({
@@ -290,7 +248,6 @@ def _options_categories(max_criteres: int) -> list[dict]:
 
 
 def _palier_le_plus_proche(n: int) -> int:
-    """Trouve le palier de règles le plus proche."""
     paliers = sorted(REGLES_PALIERS.keys())
     palier = paliers[0]
     for p in paliers:
