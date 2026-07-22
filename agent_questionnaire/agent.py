@@ -15,6 +15,7 @@ from prompts import (
     PROMPT_ACCUEIL,
     PROMPT_EXTRACTION,
     PROMPT_GENERATION,
+    PROMPT_INTRODUCTION,
     PROMPT_RESTITUTION
 )
 
@@ -23,7 +24,6 @@ load_dotenv()
 
 # ================================================
 # Liste des modèles de fallback dans l'ordre
-# Si le premier est surchargé → essai du suivant
 # ================================================
 MODELES_FALLBACK = [
     "gemini-2.5-flash",
@@ -46,9 +46,6 @@ class AgentQuestionnaire:
     def _appel_llm(self, prompt: str, system: str = None) -> str:
         """
         Appel au modèle Gemini avec fallback automatique.
-        Si un modèle est surchargé (503) ou quota épuisé (429),
-        essaie automatiquement le modèle suivant dans la liste.
-        Retourne le texte de la réponse nettoyé.
         """
         config = None
         if system:
@@ -56,7 +53,6 @@ class AgentQuestionnaire:
                 system_instruction=system
             )
 
-        # Essayer chaque modèle dans l'ordre
         for modele in MODELES_FALLBACK:
             try:
                 response = self.client.models.generate_content(
@@ -64,8 +60,6 @@ class AgentQuestionnaire:
                     config=config,
                     contents=prompt
                 )
-
-                # Nettoyer les balises markdown si présentes
                 texte = response.text.strip()
                 texte = texte.replace("```json", "")
                 texte = texte.replace("```", "").strip()
@@ -74,31 +68,26 @@ class AgentQuestionnaire:
             except Exception as e:
                 erreur = str(e)
 
-                # Erreur 503 — modèle surchargé
                 if "503" in erreur or "UNAVAILABLE" in erreur:
                     print(f"⚠️  {modele} surchargé — essai suivant...")
                     time.sleep(1)
                     continue
-
-                # Erreur 429 — quota épuisé
                 elif "429" in erreur or "RESOURCE_EXHAUSTED" in erreur:
                     print(f"⚠️  {modele} quota épuisé — essai suivant...")
                     time.sleep(1)
                     continue
-
-                # Erreur 404 — modèle introuvable
                 elif "404" in erreur or "NOT_FOUND" in erreur:
                     print(f"⚠️  {modele} introuvable — essai suivant...")
                     continue
-
-                # Autre erreur — on arrête
+                elif "10054" in erreur or "ConnectError" in erreur or "WinError" in erreur:
+                    print(f"⚠️  {modele} connexion coupée — essai suivant...")
+                    time.sleep(2)
+                    continue
                 else:
                     print(f"❌ Erreur inattendue avec {modele} : {e}")
                     raise
 
-        # Tous les modèles ont échoué
         print("❌ Tous les modèles sont indisponibles.")
-        print("   Attends quelques minutes et relance.")
         return ""
 
     # ============================================
@@ -108,7 +97,6 @@ class AgentQuestionnaire:
         """
         Dialogue avec le client pour collecter
         toutes les informations nécessaires.
-        Retourne l'historique de conversation en texte.
         """
         print("\n" + "=" * 50)
         print("   AGENT QUESTIONNAIRE — TALE")
@@ -116,7 +104,6 @@ class AgentQuestionnaire:
 
         self.historique_messages = []
 
-        # Premier message d'accueil
         message_agent = self._appel_llm(
             prompt="Bonjour, je veux créer une enquête",
             system=PROMPT_ACCUEIL
@@ -129,12 +116,10 @@ class AgentQuestionnaire:
         print(f"\n🤖 Agent: {message_agent}")
         print("-" * 50)
 
-        # Boucle de dialogue — max 8 tours
         for i in range(8):
             user_input = input("\n👤 Vous: ")
             self.historique_messages.append(f"CLIENT: {user_input}")
 
-            # Construire le contexte complet pour garder la mémoire
             contexte = "\n".join(self.historique_messages)
             prompt_avec_contexte = f"{contexte}\nAGENT:"
 
@@ -150,7 +135,6 @@ class AgentQuestionnaire:
             print(f"\n🤖 Agent: {message_agent}")
             print("-" * 50)
 
-            # Arrêter quand toutes les infos sont collectées
             if "toutes les informations" in message_agent.lower():
                 print("\n✅ Collecte terminée !")
                 break
@@ -205,12 +189,88 @@ class AgentQuestionnaire:
             return ParametresEtude()
 
     # ============================================
+    # PHASE 2.5 — Génération + validation intro
+    # ============================================
+    def _generer_et_valider_intro(
+        self,
+        parametres: ParametresEtude
+    ) -> str:
+        """
+        Génère l'introduction, la propose au client,
+        et permet de la modifier avant validation.
+        """
+        print("\n" + "=" * 50)
+        print("   INTRODUCTION DU QUESTIONNAIRE")
+        print("=" * 50)
+
+        prompt = PROMPT_INTRODUCTION.format(
+            objectif_etude=parametres.objectif_etude,
+            population_cible=parametres.population_cible,
+            type_enquete=parametres.type_enquete,
+            anonyme=parametres.anonyme,
+            langue=parametres.langue
+        )
+
+        introduction = self._appel_llm(prompt=prompt)
+
+        if not introduction:
+            return ""
+
+        print(f"\n📝 Voici l'introduction proposée :\n")
+        print("-" * 50)
+        print(introduction)
+        print("-" * 50)
+
+        while True:
+            print("\n options :")
+            print("   1 — Valider cette introduction")
+            print("   2 — La modifier manuellement")
+            print("   3 — Générer une nouvelle version")
+
+            choix = input("\n👤 Votre choix (1/2/3) : ").strip()
+
+            if choix == "1":
+                print("✅ Introduction validée !")
+                return introduction
+
+            elif choix == "2":
+                print("\n✏️  Tapez votre introduction")
+                print("   (appuyez sur Entrée vide pour terminer)")
+                lignes = []
+                while True:
+                    ligne = input()
+                    if ligne == "":
+                        break
+                    lignes.append(ligne)
+                introduction = "\n".join(lignes)
+                print("\n📝 Nouvelle introduction :")
+                print("-" * 50)
+                print(introduction)
+                print("-" * 50)
+                confirmer = input(
+                    "\n👤 Confirmer ? (o/n) : "
+                ).strip().lower()
+                if confirmer == "o":
+                    print("✅ Introduction validée !")
+                    return introduction
+
+            elif choix == "3":
+                print("\n⚙️  Génération d'une nouvelle version...")
+                introduction = self._appel_llm(prompt=prompt)
+                print(f"\n📝 Nouvelle proposition :\n")
+                print("-" * 50)
+                print(introduction)
+                print("-" * 50)
+
+            else:
+                print("⚠️  Choix invalide — tape 1, 2 ou 3")
+
+    # ============================================
     # PHASE 3 — Génération du questionnaire
     # ============================================
     def _generer(self, parametres: ParametresEtude) -> Questionnaire:
         """
-        Génère le questionnaire complet basé
-        sur les paramètres extraits.
+        Génère le questionnaire complet.
         La durée est calculée par Python — jamais par le LLM.
         """
         print("\n⚙️  Génération du questionnaire...")
@@ -235,7 +295,6 @@ class AgentQuestionnaire:
         try:
             data = json.loads(texte)
 
-            # Construire la liste de questions
             questions = []
             for q_data in data.get("questions", []):
                 question = Question(
@@ -249,7 +308,6 @@ class AgentQuestionnaire:
                 )
                 questions.append(question)
 
-            # Construire le questionnaire
             questionnaire = Questionnaire(
                 parametres=parametres,
                 questions=questions,
@@ -257,7 +315,7 @@ class AgentQuestionnaire:
                 nb_questions_total=data.get("nb_questions_total", 0)
             )
 
-            # ← CALCUL DURÉE PAR PYTHON — jamais par le LLM
+            # CALCUL DURÉE PAR PYTHON — jamais par le LLM
             questionnaire.duree_estimee_minutes = (
                 questionnaire.calculer_duree()
             )
@@ -275,7 +333,6 @@ class AgentQuestionnaire:
 
     # ============================================
     # PHASE 4 — Validation
-    # (spaCy complet ajouté dans validator.py — semaine 4)
     # ============================================
     def _valider(self, questionnaire: Questionnaire) -> Questionnaire:
         """
@@ -287,7 +344,6 @@ class AgentQuestionnaire:
         problemes = []
         alertes = []
 
-        # ← ALERTE DURÉE — calculée par Python
         duree = questionnaire.duree_estimee_minutes
         if duree > 10:
             alertes.append(
@@ -298,34 +354,25 @@ class AgentQuestionnaire:
                 f"{questionnaire.nb_questions_total - 2} questions."
             )
 
-        # Validation linguistique basique de chaque question
         for q in questionnaire.questions:
-
-            # Règle 1 — question trop courte
             if len(q.texte) < 10:
                 problemes.append(
                     f"Q{q.index} trop courte : '{q.texte}'"
                 )
-
-            # Règle 2 — double négation simple
             if "ne" in q.texte.lower() and "pas" in q.texte.lower():
                 problemes.append(
                     f"Q{q.index} — possible double négation détectée"
                 )
-
-            # Règle 3 — double question
             if q.texte.count("?") > 1:
                 problemes.append(
                     f"Q{q.index} — double question détectée"
                 )
 
-        # Afficher les alertes durée
         if alertes:
             print(f"\n⚠️  ALERTES :")
             for a in alertes:
                 print(f"   {a}")
 
-        # Afficher les problèmes de biais
         if problemes:
             print(f"\n⚠️  {len(problemes)} problème(s) détecté(s) :")
             for p in problemes:
@@ -341,8 +388,7 @@ class AgentQuestionnaire:
     # ============================================
     def _restituer(self, questionnaire: Questionnaire):
         """
-        Présente le questionnaire final au client
-        et demande validation.
+        Présente le questionnaire final au client.
         """
         print("\n" + "=" * 50)
         print("   PRÉSENTATION DE L'ENQUÊTE")
@@ -367,26 +413,28 @@ class AgentQuestionnaire:
     def run(self) -> dict:
         """
         Lance l'agent complet.
-        Retourne le JSON final à transmettre à Eya (Agent 1).
+        Retourne le JSON final à transmettre à Eya.
         """
         # Phase 1 — Dialogue
         historique_texte = self._dialogue()
-
         if not historique_texte:
-            print("\n❌ Dialogue échoué — tous les modèles indisponibles.")
+            print("\n❌ Dialogue échoué.")
             return {}
 
         # Phase 2 — Extraction
         parametres = self._extraire(historique_texte)
-
-        # Vérifier que les paramètres sont complets
         if not parametres.est_complet():
             print("\n❌ Informations insuffisantes.")
-            print("   Relance l'agent et réponds à toutes les questions.")
             return {}
 
-        # Phase 3 — Génération
+        # Phase 2.5 — Introduction validée par le client
+        introduction = self._generer_et_valider_intro(parametres)
+
+        # Phase 3 — Génération questions
         questionnaire = self._generer(parametres)
+
+        # Injecter l'introduction validée
+        questionnaire.introduction = introduction
 
         # Phase 4 — Validation
         questionnaire = self._valider(questionnaire)
